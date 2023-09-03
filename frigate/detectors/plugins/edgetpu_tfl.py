@@ -260,7 +260,6 @@ class EdgeTpuTfl(DetectionApi):
             self.output_class_scores_index = None
 
     def determine_indexes(self):
-        #logger.info(f"self.tensor_output_details={self.tensor_output_details}")
         if self.output_class_ids_index is None or self.output_class_scores_index is None:
             for i in range(4):
                 index = self.tensor_output_details[i]["index"]
@@ -281,7 +280,6 @@ class EdgeTpuTfl(DetectionApi):
 
 
     def yolo_postprocess(self):
-        #np.save("/media/frigate/tensor_output.npy", outputs, allow_pickle=True, fix_imports=True)
         y = []
         for output in self.tensor_output_details:
             x = self.interpreter.get_tensor(output['index'])
@@ -322,8 +320,6 @@ class EdgeTpuTfl(DetectionApi):
         if self.yolo_model:
             boxes, scores, class_ids, count = self.yolo_postprocess()
         else:
-            self.interpreter.set_tensor(self.tensor_input_details[0]["index"], tensor_input)
-            self.interpreter.invoke()
             self.determine_indexes()
 
             boxes = self.interpreter.tensor(self.output_boxes_index)()[0]

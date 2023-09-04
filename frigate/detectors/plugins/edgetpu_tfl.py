@@ -17,6 +17,7 @@ except ModuleNotFoundError:
 logger = logging.getLogger(__name__)
 
 DETECTOR_KEY = "edgetpu"
+USE_YOLO_NMS = False
 
 def xywh2xyxy(x):
     """
@@ -87,7 +88,7 @@ def nms(boxes, overlap_threshold=0.5, min_mode=False):
 
 def non_max_suppression(
         prediction,
-        conf_thres=0.25,
+        conf_thres=0.4,
         iou_thres=0.7,
         classes=None,
         agnostic=False,
@@ -211,6 +212,47 @@ def non_max_suppression(
             break  # time limit exceeded
     return output
 
+def get_boxes_from_yolo_output(prediction, conf_thres=0.4):
+    """
+    Get boxes from predictions where confidence threshold is above given limit.
+
+    Arguments:
+        prediction (numpy array): A numpy array of shape (batch_size, num_classes + 4 + num_masks, num_boxes)
+            containing the predicted boxes, classes, and masks. The tensor should be in the format
+            output by a model, such as YOLO.
+        conf_thres (float): The confidence threshold below which boxes will be filtered out.
+            Valid values are between 0.0 and 1.0.
+
+    Returns:
+        (List[numpy array]): A list of length batch_size, where each element is a tensor of
+            shape (num_boxes, 6 + num_masks) containing the kept boxes, with columns
+            (x1, y1, x2, y2, confidence, class, mask1, mask2, ...).
+    """
+    if isinstance(prediction, (
+        list, tuple)):  # YOLOv8 model in validation model, output = (inference_out, loss_out)
+        prediction = prediction[0]  # select only inference output
+
+    output = np.empty(shape=(0,6))
+    nc = prediction.shape[1] - 4  # number of classes
+    mi = 4 + nc  # mask start index
+    xc = np.max(prediction[:, 4:mi], axis=1) > conf_thres  # candidates
+
+    prediction = np.transpose(prediction, (0, 2, 1))
+
+    candidates = prediction[xc]
+    candidates[..., :4] = xywh2xyxy(candidates[..., :4])  # xywh to xyxy
+    num_of_cars = 0
+    for xi, x in enumerate(candidates):
+        box, cls = np.array_split(x, [4])
+
+        max_score_class = np.argmax(cls)
+
+        output_row = np.array([box[0], box[1], box[2], box[3], x[4 + max_score_class], max_score_class])
+        output = np.vstack((output, output_row))
+
+    # sort based on score
+    return output[output[:, 5].argsort()]
+
 class EdgeTpuDetectorConfig(BaseDetectorConfig):
     type: Literal[DETECTOR_KEY]
     device: str = Field(default=None, title="Device Type")
@@ -246,6 +288,9 @@ class EdgeTpuTfl(DetectionApi):
         self.tensor_output_details = self.interpreter.get_output_details()
         self.detector_config = detector_config
 
+        self.min_score = 0.4
+        self.max_detections = 20
+
         if self.tensor_input_details[0]['dtype'] == np.int8:
             self.yolo_model = True
         else:
@@ -259,7 +304,7 @@ class EdgeTpuTfl(DetectionApi):
             self.output_class_ids_index = None
             self.output_class_scores_index = None
 
-    def determine_indexes(self):
+    def determine_indexes_for_non_yolo_models(self):
         if self.output_class_ids_index is None or self.output_class_scores_index is None:
             for i in range(4):
                 index = self.tensor_output_details[i]["index"]
@@ -273,13 +318,15 @@ class EdgeTpuTfl(DetectionApi):
     def yolo_preprocess(self, input):
         details = self.tensor_input_details[0]
 
-        input = input.astype('float')/255
+        input = input.astype('float') / 255
         scale, zero_point = details['quantization']
         input = (input / scale + zero_point).astype(details['dtype'])
         return input
 
 
     def yolo_postprocess(self):
+        model_width = self.detector_config.model.width
+        model_height = self.detector_config.model.height
         y = []
         for output in self.tensor_output_details:
             x = self.interpreter.get_tensor(output['index'])
@@ -289,10 +336,14 @@ class EdgeTpuTfl(DetectionApi):
 
             # Denormalize xywh by image size. See https://github.com/ultralytics/ultralytics/pull/1695
             # xywh are normalized in TFLite/EdgeTPU to mitigate quantization error of integer models
-            x[:, [0, 2]] *= 320
-            x[:, [1, 3]] *= 320
+            x[:, [0, 2]] *= model_width
+            x[:, [1, 3]] *= model_height
             y.append(x)
-        detections = non_max_suppression(y)
+
+        if USE_YOLO_NMS:
+            detections = non_max_suppression(y, conf_thres=self.min_score)
+        else:
+            detections = get_boxes_from_yolo_output(y, conf_thres=self.min_score)
         
         boxes = []
         class_ids = []
@@ -300,17 +351,16 @@ class EdgeTpuTfl(DetectionApi):
 
         for det in detections:
             boxes.append(
-                [det[1] / 320,
-                det[0] / 320,
-                det[3] / 320,
-                det[2] / 320])
+                [det[1] / model_height,
+                det[0] / model_width,
+                det[3] / model_height,
+                det[2] / model_width])
             scores.append(det[4])
             class_ids.append(det[5])
 
         return boxes, scores, class_ids, len(boxes)
 
     def detect_raw(self, tensor_input):
-
         if self.yolo_model:
             tensor_input = self.yolo_preprocess(tensor_input)
 
@@ -320,7 +370,7 @@ class EdgeTpuTfl(DetectionApi):
         if self.yolo_model:
             boxes, scores, class_ids, count = self.yolo_postprocess()
         else:
-            self.determine_indexes()
+            self.determine_indexes_for_non_yolo_models()
 
             boxes = self.interpreter.tensor(self.output_boxes_index)()[0]
             class_ids = self.interpreter.tensor(self.output_class_ids_index)()[0]
@@ -330,10 +380,13 @@ class EdgeTpuTfl(DetectionApi):
                 self.interpreter.tensor(self.output_count_index)()[0]
             )
 
-        detections = np.zeros((20, 6), np.float32)
+        detections = np.zeros((self.max_detections, 6), np.float32)
 
         for i in range(count):
-            if scores[i] < 0.4 or i == 20:
+            if scores[i] < self.min_score:
+                break
+            if i == self.max_detections:
+                logger.info(f"Too many detections ({count})!")
                 break
             detections[i] = [
                 class_ids[i],

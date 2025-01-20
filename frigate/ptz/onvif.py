@@ -667,7 +667,7 @@ class OnvifController:
             return
 
         position_changed = status.Position.PanTilt.x != self.cams[camera_name]["last_pan_tilt_pos"][0] or status.Position.PanTilt.y != self.cams[camera_name]["last_pan_tilt_pos"][1]
-        zoom_changed = status.Position.Zoom.x != status.Position.Zoom.x
+        zoom_changed = self.cams[camera_name]["last_zoom_pos"] != status.Position.Zoom.x
 
         self.cams[camera_name]["last_pan_tilt_pos"] = (status.Position.PanTilt.x, status.Position.PanTilt.y)
         self.cams[camera_name]["last_zoom_pos"] = status.Position.Zoom.x

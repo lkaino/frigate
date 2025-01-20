@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy
 import requests
+import time
 from onvif import ONVIFCamera, ONVIFError
 from zeep.exceptions import Fault, TransportError
 from zeep.transports import Transport
@@ -325,6 +326,9 @@ class OnvifController:
             )
 
         self.cams[camera_name]["features"] = supported_features
+        self.cams[camera_name]["last_pan_tilt_pos"] = (0.0, 0.0)
+        self.cams[camera_name]["last_zoom_pos"] = 0.0
+        self.cams[camera_name]["last_pos_change_time"] = 0.0
 
         self.cams[camera_name]["init"] = True
         return True
@@ -662,7 +666,16 @@ class OnvifController:
             )
             return
 
-        if pan_tilt_status == "IDLE" and (zoom_status is None or zoom_status == "IDLE"):
+        position_changed = status.Position.PanTilt.x != self.cams[camera_name]["last_pan_tilt_pos"][0] or status.Position.PanTilt.y != self.cams[camera_name]["last_pan_tilt_pos"][1]
+        zoom_changed = status.Position.Zoom.x != status.Position.Zoom.x
+
+        self.cams[camera_name]["last_pan_tilt_pos"] = (status.Position.PanTilt.x, status.Position.PanTilt.y)
+        self.cams[camera_name]["last_zoom_pos"] = status.Position.Zoom.x
+        if position_changed or zoom_changed:
+            self.cams[camera_name]["last_pos_change_time"] = time.time()
+        time_since_last_pos_change = time.time() - self.cams[camera_name]["last_pos_change_time"]
+
+        if time_since_last_pos_change > 0.1 or ((pan_tilt_status == "IDLE") and (zoom_status is None or zoom_status == "IDLE")):
             self.cams[camera_name]["active"] = False
             if not self.ptz_metrics[camera_name].motor_stopped.is_set():
                 self.ptz_metrics[camera_name].motor_stopped.set()

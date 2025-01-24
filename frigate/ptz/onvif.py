@@ -18,8 +18,6 @@ from frigate.util.builtin import find_by_key
 
 logger = logging.getLogger(__name__)
 
-MOVEMENT_TO_IMAGE_DELAY_S = 1.370
-
 
 class OnvifCommandEnum(str, Enum):
     """Holds all possible move commands"""
@@ -677,10 +675,7 @@ class OnvifController:
             self.cams[camera_name]["last_pos_change_time"] = time.time()
         time_since_last_pos_change = time.time() - self.cams[camera_name]["last_pos_change_time"]
 
-        if time_since_last_pos_change > 0.1 + MOVEMENT_TO_IMAGE_DELAY_S or (
-            (pan_tilt_status == "IDLE")
-            and (zoom_status is None or zoom_status == "IDLE")
-        ):
+        if time_since_last_pos_change > 0.1 or ((pan_tilt_status == "IDLE") and (zoom_status is None or zoom_status == "IDLE")):
             self.cams[camera_name]["active"] = False
             if not self.ptz_metrics[camera_name].motor_stopped.is_set():
                 self.ptz_metrics[camera_name].motor_stopped.set()
